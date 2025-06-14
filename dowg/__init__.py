@@ -1,1 +1,1 @@
-from .dowg import DoWG, CDoWG
+from .dowg import DoWG, CDoWG, NDoWG

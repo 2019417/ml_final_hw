@@ -6,6 +6,77 @@ import copy
 
 from torch.optim import Optimizer
 
+class NDoWG(Optimizer):
+    """Implements DoWG optimization algorithm.
+    
+    Args:
+        eps (float, optional): term added to the denominator to improve
+            numerical stability (default: 1e-4). Also used as the default squared distance estimate.
+    """
+
+    def __init__(self, params, eps=1e-4,momentum=0.9):
+        if eps < 0.0:
+            raise ValueError(f"Invalid eps value: {eps}")
+        if momentum < 0.0:
+            raise ValueError(f"Invalid momentum value: {momentum}")
+        defaults = dict(eps=eps,momentum=momentum)
+        self.eps = eps
+        self.momentum = momentum
+        super(NDoWG, self).__init__(params, defaults)
+        
+        
+    def __setstate__(self, state):
+        super(NDoWG, self).__setstate__(state)
+
+    def step(self):
+        """Performs a single optimization step."""
+        state = self.state
+
+        with torch.no_grad():
+            device = self.param_groups[0]['params'][0].device
+
+            # Initialize state variables if needed
+            if 'rt2' not in state:
+                state['rt2'] = torch.Tensor([self.eps]).to(device)
+            if 'vt' not in state:
+                state['vt'] = torch.Tensor([0]).to(device)
+
+            grad_sq_norm = torch.Tensor([0]).to(device)
+            curr_d2 = torch.Tensor([0]).to(device)
+            
+            for idx, group in enumerate(self.param_groups):
+                group_state = state[idx]
+                if 'x0' not in group_state:
+                    group_state['x0'] = [torch.clone(p) for p in group["params"]]
+                    
+                grad_sq_norm += torch.stack([(p.grad ** 2).sum() for p in group["params"]]).sum()
+                curr_d2 += torch.stack([((p - p0) ** 2).sum() for p, p0 in zip(group["params"], group_state['x0'])]).sum()
+            
+            state['rt2'] = torch.max(state['rt2'], curr_d2)
+            state['vt'] += (state['rt2'] * grad_sq_norm)
+            rt2, vt = state['rt2'], state['vt']
+            
+            for group in self.param_groups:
+                momentum = group['momentum']
+                for p in group['params']:
+                    # using nestor momentum
+                    if p.grad is None:
+                        continue
+                    state = self.state[p]
+                    if 'momentum_buffer' not in state:
+                        d_v = state['momentum_buffer'] = p.grad.clone().detach()
+                    else:
+                        d_v = state['momentum_buffer']
+                        # accumulate the momentum
+                        state['momentum_buffer'].mul_(group['momentum']).add_(p.grad)
+                    
+                    # compute the update    
+                    gt_hat = rt2 * (p.grad.data + momentum * d_v)
+                    denom = torch.sqrt(vt).add_(group['eps'])
+                    # update para
+                    p.data.addcdiv_(gt_hat, denom, value=-1.0)
+        return None
+
 class DoWG(Optimizer):
     """Implements DoWG optimization algorithm.
     
@@ -51,6 +122,7 @@ class DoWG(Optimizer):
                 for p in group['params']:
                     gt_hat = rt2 * p.grad.data
                     denom = torch.sqrt(vt).add_(group['eps'])
+                    # update para
                     p.data.addcdiv_(gt_hat, denom, value=-1.0)
         return None
 
